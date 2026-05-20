@@ -1,5 +1,7 @@
 use anyhow::Result;
 
+use crate::tmux::TmuxClient;
+
 pub struct App;
 
 impl App {
@@ -8,7 +10,27 @@ impl App {
     }
 
     pub fn run(&mut self) -> Result<()> {
-        println!("tmuxr bootstrap is ready. Session-centric TUI features come next.");
+        let client = TmuxClient::new();
+        let context = client.detect();
+
+        if !context.binary_available {
+            println!("tmux is not installed or not available in PATH.");
+            return Ok(());
+        }
+
+        let sessions = client.list_sessions()?;
+
+        println!("tmuxr core integration bootstrap");
+        println!("inside tmux client: {}", context.inside_client);
+        println!("available sessions: {}", sessions.len());
+
+        for session in sessions {
+            println!(
+                "- {} (windows: {}, attached: {})",
+                session.name, session.window_count, session.attached
+            );
+        }
+
         Ok(())
     }
 }

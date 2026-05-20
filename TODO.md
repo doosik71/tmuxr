@@ -13,13 +13,13 @@ This document organizes the work for `tmuxr` by phase so development can move fr
 
 ## Phase 1. Core tmux Integration
 
-- Detect whether the `tmux` binary is installed.
-- Detect whether the app is running inside an active `tmux` client.
-- Implement a command runner wrapper around `tmux`.
-- Implement typed parsing for `tmux list-sessions`.
-- Define domain models for session metadata.
-- Add friendly error types and messages for common failures.
-- Verify behavior when no tmux server or no sessions exist.
+- [x] Detect whether the `tmux` binary is installed.
+- [x] Detect whether the app is running inside an active `tmux` client.
+- [x] Implement a command runner wrapper around `tmux`.
+- [x] Implement typed parsing for `tmux list-sessions`.
+- [x] Define domain models for session metadata.
+- [x] Add friendly error types and messages for common failures.
+- [x] Verify behavior when no tmux server or no sessions exist.
 
 ## Phase 2. Minimal TUI Framework
 
@@ -118,6 +118,6 @@ This document organizes the work for `tmuxr` by phase so development can move fr
 
 ## Suggested Immediate Next Tasks
 
-- Implement `tmux` availability detection.
-- Implement `tmux list-sessions` parsing.
+- Set up terminal initialization and cleanup.
+- Enter alternate screen mode and restore terminal state on exit.
 - Build a read-only session list TUI before adding mutating actions.
