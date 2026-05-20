@@ -23,13 +23,13 @@ This document organizes the work for `tmuxr` by phase so development can move fr
 
 ## Phase 2. Minimal TUI Framework
 
-- Set up terminal initialization and cleanup.
-- Enter alternate screen mode and restore terminal state on exit.
-- Enable keyboard event handling.
-- Add a base layout with header, content area, footer, and status line.
-- Implement a simple screen/state model.
-- Add an event loop with render and input handling.
-- Ensure the app handles resize events gracefully.
+- [x] Set up terminal initialization and cleanup.
+- [x] Enter alternate screen mode and restore terminal state on exit.
+- [x] Enable keyboard event handling.
+- [x] Add a base layout with header, content area, footer, and status line.
+- [x] Implement a simple screen/state model.
+- [x] Add an event loop with render and input handling.
+- [x] Ensure the app handles resize events gracefully.
 
 ## Phase 3. Session List MVP
 
@@ -118,6 +118,6 @@ This document organizes the work for `tmuxr` by phase so development can move fr
 
 ## Suggested Immediate Next Tasks
 
-- Set up terminal initialization and cleanup.
-- Enter alternate screen mode and restore terminal state on exit.
-- Build a read-only session list TUI before adding mutating actions.
+- Render sessions in a selectable list widget.
+- Add up/down selection state and highlight styling.
+- Wire Enter to a placeholder session action before mutating commands land.

@@ -10,7 +10,7 @@ use crate::domain::SessionSummary;
 const TMUX_BIN: &str = "tmux";
 const SESSION_FORMAT: &str = "#S|#{session_windows}|#{?session_attached,1,0}";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TmuxContext {
     pub binary_available: bool,
     pub inside_client: bool,
