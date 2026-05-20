@@ -1,12 +1,19 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};
+use crossterm::terminal;
 
 use crate::config::AppConfig;
 use crate::domain::SessionSummary;
 use crate::tmux::{TmuxClient, TmuxContext};
-use crate::ui::{ModalView, Screen, SessionListItem, TerminalGuard, ViewModel};
+use crate::ui::{
+    ModalButton, ModalView, Screen, SessionListItem, TerminalGuard, ViewModel, modal_button_at,
+    session_index_at,
+};
 
 pub struct App {
     config: AppConfig,
@@ -23,6 +30,7 @@ struct AppState {
     sessions: Vec<SessionSummary>,
     selected_session: Option<usize>,
     interaction: InteractionState,
+    terminal_size: (u16, u16),
 }
 
 #[derive(Debug, Clone)]
@@ -34,10 +42,11 @@ enum InteractionState {
 
 impl App {
     pub fn new() -> Self {
+        let terminal_size = terminal::size().unwrap_or((100, 32));
         Self {
             config: AppConfig::default(),
             tmux_client: TmuxClient::new(),
-            state: AppState::new(),
+            state: AppState::new(terminal_size),
         }
     }
 
@@ -54,6 +63,7 @@ impl App {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
                         self.handle_key_event(key)
                     }
+                    Event::Mouse(mouse) => self.handle_mouse_event(mouse),
                     Event::Resize(width, height) => self.state.handle_resize(width, height),
                     _ => {}
                 }
@@ -72,6 +82,56 @@ impl App {
             InteractionState::ConfirmKill { session_name } => {
                 self.handle_confirm_kill_key_event(key, &session_name)
             }
+        }
+    }
+
+    fn handle_mouse_event(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => self.handle_left_click(mouse),
+            MouseEventKind::ScrollUp => self.state.select_previous_session(),
+            MouseEventKind::ScrollDown => self.state.select_next_session(),
+            _ => {}
+        }
+    }
+
+    fn handle_left_click(&mut self, mouse: MouseEvent) {
+        let Some(modal) = self.state.modal_view() else {
+            if self.state.screen == Screen::Home {
+                if let Some(index) = session_index_at(
+                    self.state.terminal_size.0,
+                    self.state.terminal_size.1,
+                    self.state.sessions.len(),
+                    mouse.column,
+                    mouse.row,
+                ) {
+                    self.state.select_session(index);
+                }
+            }
+            return;
+        };
+
+        match modal_button_at(
+            self.state.terminal_size.0,
+            self.state.terminal_size.1,
+            &modal,
+            mouse.column,
+            mouse.row,
+        ) {
+            Some(ModalButton::Confirm) => match self.state.interaction.clone() {
+                InteractionState::Creating { detached, .. } => self.create_session(detached),
+                InteractionState::ConfirmKill { session_name } => self.kill_session(&session_name),
+                InteractionState::Browsing => {}
+            },
+            Some(ModalButton::Cancel) => match self.state.interaction {
+                InteractionState::Creating { .. } => {
+                    self.state.cancel_interaction("Canceled session creation.")
+                }
+                InteractionState::ConfirmKill { .. } => self
+                    .state
+                    .cancel_interaction("Canceled kill session action."),
+                InteractionState::Browsing => {}
+            },
+            None => {}
         }
     }
 
@@ -248,7 +308,7 @@ impl App {
 }
 
 impl AppState {
-    fn new() -> Self {
+    fn new(terminal_size: (u16, u16)) -> Self {
         Self {
             screen: Screen::Home,
             should_quit: false,
@@ -257,6 +317,7 @@ impl AppState {
             sessions: Vec::new(),
             selected_session: None,
             interaction: InteractionState::Browsing,
+            terminal_size,
         }
     }
 
@@ -267,16 +328,16 @@ impl AppState {
     fn current_footer_hint(&self) -> String {
         match (&self.screen, &self.interaction) {
             (_, InteractionState::Creating { .. }) => {
-                "Type name | Enter confirm | Esc cancel".to_string()
+                "Type name | Enter confirm | Click Confirm/Cancel | Esc cancel".to_string()
             }
             (_, InteractionState::ConfirmKill { .. }) => {
-                "y/Enter confirm kill | n/Esc cancel".to_string()
+                "y/Enter confirm kill | Click buttons | n/Esc cancel".to_string()
             }
             (Screen::Help, InteractionState::Browsing) => {
                 "h/?/Esc back | q quit".to_string()
             }
             (Screen::Home, InteractionState::Browsing) => {
-                "?/h help | Up/Down move | Enter/a attach | n new | N new -d | d detach | x kill | r refresh | q quit".to_string()
+                "?/h help | Up/Down or wheel move | Click select | Enter/a attach | n/N create | d detach | x kill | r refresh | q quit".to_string()
             }
         }
     }
@@ -292,6 +353,7 @@ impl AppState {
     }
 
     fn handle_resize(&mut self, width: u16, height: u16) {
+        self.terminal_size = (width, height);
         self.status_message = format!("Terminal resized to {width}x{height}.");
     }
 
@@ -356,6 +418,13 @@ impl AppState {
         };
     }
 
+    fn select_session(&mut self, index: usize) {
+        if index < self.sessions.len() {
+            self.selected_session = Some(index);
+            self.status_message = format!("Selected session '{}'.", self.sessions[index].name);
+        }
+    }
+
     fn select_previous_session(&mut self) {
         if self.sessions.is_empty() {
             self.selected_session = None;
@@ -411,7 +480,13 @@ impl AppState {
             screen: self.screen,
             title: "tmuxr".to_string(),
             subtitle: match self.screen {
-                Screen::Home => "Session actions".to_string(),
+                Screen::Home => {
+                    if self.terminal_size.0 < 96 || self.terminal_size.1 < 18 {
+                        "Session actions | compact layout".to_string()
+                    } else {
+                        "Session actions".to_string()
+                    }
+                }
                 Screen::Help => "Help and guidance".to_string(),
             },
             sessions,
@@ -432,6 +507,10 @@ impl AppState {
         let mut lines = vec![
             format!("Inside tmux client: {}", self.tmux_context.inside_client),
             format!("Known sessions: {}", self.sessions.len()),
+            format!(
+                "Terminal size: {}x{}",
+                self.terminal_size.0, self.terminal_size.1
+            ),
             String::new(),
         ];
 
@@ -444,7 +523,7 @@ impl AppState {
 
         let Some(index) = self.selected_session else {
             lines.push("No session selected.".to_string());
-            lines.push("Use Up/Down to choose a session when one exists.".to_string());
+            lines.push("Use Up/Down, mouse wheel, or click a session to choose one.".to_string());
             lines.push("Use n or N to create a session.".to_string());
             lines.push("Press ? to view the hotkey guide.".to_string());
             return lines;
@@ -458,6 +537,7 @@ impl AppState {
         lines.push(
             "Actions: Enter/a attach or switch, d detach current client, x kill.".to_string(),
         );
+        lines.push("Mouse: click a session to select it, scroll to move.".to_string());
         lines.push("Creation: n for attached session, N for detached session.".to_string());
         lines.push("Guidance: press ? or h to open the full help screen.".to_string());
         lines
@@ -469,6 +549,8 @@ impl AppState {
             String::new(),
             "Navigation".to_string(),
             "- Up/Down or j/k: move through the session list".to_string(),
+            "- Mouse wheel: move through the session list".to_string(),
+            "- Left click on a session: select it".to_string(),
             "- Enter or a: attach to the selected session, or switch client inside tmux"
                 .to_string(),
             "- r: refresh the tmux session list".to_string(),
@@ -485,11 +567,16 @@ impl AppState {
             "Dialogs".to_string(),
             "- Create dialog: type a name, Enter confirms, Esc cancels".to_string(),
             "- Kill dialog: y or Enter confirms, n or Esc cancels".to_string(),
+            "- Mouse: click Confirm or Cancel in dialogs".to_string(),
+            String::new(),
+            "Layout".to_string(),
+            "- The UI switches to a compact stacked layout in smaller terminals.".to_string(),
+            "- Resize the terminal and tmuxr will adapt the session/detail arrangement."
+                .to_string(),
             String::new(),
             "Notes".to_string(),
             "- tmuxr is a helper UI on top of tmux commands.".to_string(),
             "- Some actions depend on whether you launched tmuxr inside tmux.".to_string(),
-            "- Mouse support will be expanded in a later phase.".to_string(),
         ]
     }
 
@@ -557,9 +644,10 @@ mod tests {
 
     #[test]
     fn resize_updates_status_message() {
-        let mut state = AppState::new();
+        let mut state = AppState::new((100, 30));
         state.handle_resize(120, 40);
         assert_eq!(state.status_message, "Terminal resized to 120x40.");
+        assert_eq!(state.terminal_size, (120, 40));
     }
 
     #[test]
@@ -570,7 +658,7 @@ mod tests {
 
     #[test]
     fn selection_defaults_to_first_session() {
-        let mut state = AppState::new();
+        let mut state = AppState::new((100, 30));
         state.sessions = vec![SessionSummary::new("dev", 2, true)];
         state.ensure_valid_selection();
         assert_eq!(state.selected_session, Some(0));
@@ -578,7 +666,7 @@ mod tests {
 
     #[test]
     fn selection_wraps_forward() {
-        let mut state = AppState::new();
+        let mut state = AppState::new((100, 30));
         state.sessions = vec![
             SessionSummary::new("dev", 2, true),
             SessionSummary::new("ops", 1, false),
@@ -591,7 +679,7 @@ mod tests {
 
     #[test]
     fn selection_wraps_backward() {
-        let mut state = AppState::new();
+        let mut state = AppState::new((100, 30));
         state.sessions = vec![
             SessionSummary::new("dev", 2, true),
             SessionSummary::new("ops", 1, false),
@@ -602,8 +690,20 @@ mod tests {
     }
 
     #[test]
+    fn direct_selection_sets_status() {
+        let mut state = AppState::new((100, 30));
+        state.sessions = vec![
+            SessionSummary::new("dev", 2, true),
+            SessionSummary::new("ops", 1, false),
+        ];
+        state.select_session(1);
+        assert_eq!(state.selected_session, Some(1));
+        assert!(state.status_message.contains("ops"));
+    }
+
+    #[test]
     fn create_flow_tracks_input() {
-        let mut state = AppState::new();
+        let mut state = AppState::new((100, 30));
         state.start_create(true);
         state.push_create_input('d');
         state.push_create_input('e');
@@ -617,7 +717,7 @@ mod tests {
 
     #[test]
     fn kill_confirmation_uses_selected_session() {
-        let mut state = AppState::new();
+        let mut state = AppState::new((100, 30));
         state.sessions = vec![SessionSummary::new("dev", 2, true)];
         state.ensure_valid_selection();
         state.start_kill_confirmation();
@@ -637,7 +737,7 @@ mod tests {
 
     #[test]
     fn help_screen_can_be_opened_and_closed() {
-        let mut state = AppState::new();
+        let mut state = AppState::new((100, 30));
         state.show_help();
         assert_eq!(state.screen, Screen::Help);
         state.show_home();
@@ -646,8 +746,8 @@ mod tests {
 
     #[test]
     fn footer_hint_changes_with_help_screen() {
-        let mut state = AppState::new();
-        assert!(state.current_footer_hint().contains("help"));
+        let mut state = AppState::new((100, 30));
+        assert!(state.current_footer_hint().contains("Click select"));
         state.show_help();
         assert!(state.current_footer_hint().contains("back"));
     }

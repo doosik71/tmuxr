@@ -43,6 +43,12 @@ pub enum ModalView {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModalButton {
+    Confirm,
+    Cancel,
+}
+
 #[derive(Debug, Clone)]
 pub struct ViewModel {
     pub screen: Screen,
@@ -108,15 +114,7 @@ impl Drop for TerminalGuard {
 }
 
 pub fn render(frame: &mut Frame, view_model: &ViewModel) {
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(10),
-            Constraint::Length(3),
-            Constraint::Length(1),
-        ])
-        .split(frame.area());
+    let layout = root_layout(frame.area());
 
     let header = Paragraph::new(vec![
         Line::from(Span::styled(
@@ -127,17 +125,26 @@ pub fn render(frame: &mut Frame, view_model: &ViewModel) {
         )),
         Line::from(view_model.subtitle.as_str()),
     ])
-    .block(Block::default().borders(Borders::ALL).title("Header"));
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title("Header"),
+    );
 
-    frame.render_widget(header, layout[0]);
+    frame.render_widget(header, layout.header);
 
     match view_model.screen {
-        Screen::Home => render_home(frame, view_model, layout[1]),
-        Screen::Help => render_help(frame, view_model, layout[1]),
+        Screen::Home => render_home(frame, view_model, layout.content),
+        Screen::Help => render_help(frame, view_model, layout.content),
     }
 
-    let footer = Paragraph::new(view_model.footer_hint.as_str())
-        .block(Block::default().borders(Borders::ALL).title("Help"));
+    let footer = Paragraph::new(view_model.footer_hint.as_str()).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow))
+            .title("Help"),
+    );
 
     let status = Paragraph::new(Line::from(Span::styled(
         view_model.status_message.as_str(),
@@ -147,19 +154,65 @@ pub fn render(frame: &mut Frame, view_model: &ViewModel) {
             .add_modifier(Modifier::BOLD),
     )));
 
-    frame.render_widget(footer, layout[2]);
-    frame.render_widget(status, layout[3]);
+    frame.render_widget(footer, layout.footer);
+    frame.render_widget(status, layout.status);
 
     if let Some(modal) = &view_model.modal {
         render_modal(frame, modal);
     }
 }
 
+pub fn session_index_at(
+    width: u16,
+    height: u16,
+    session_count: usize,
+    column: u16,
+    row: u16,
+) -> Option<usize> {
+    if session_count == 0 {
+        return None;
+    }
+
+    let root = root_layout(Rect::new(0, 0, width, height));
+    let list_area = home_regions(root.content).list;
+    if !contains(list_area, column, row) {
+        return None;
+    }
+
+    let inner = inset_borders(list_area)?;
+    if !contains(inner, column, row) {
+        return None;
+    }
+
+    let relative_row = row.saturating_sub(inner.y) as usize;
+    if relative_row < session_count {
+        Some(relative_row)
+    } else {
+        None
+    }
+}
+
+pub fn modal_button_at(
+    width: u16,
+    height: u16,
+    modal: &ModalView,
+    column: u16,
+    row: u16,
+) -> Option<ModalButton> {
+    let area = modal_area(Rect::new(0, 0, width, height), modal);
+    let buttons = modal_button_areas(area);
+
+    if contains(buttons.confirm, column, row) {
+        return Some(ModalButton::Confirm);
+    }
+    if contains(buttons.cancel, column, row) {
+        return Some(ModalButton::Cancel);
+    }
+    None
+}
+
 fn render_home(frame: &mut Frame, view_model: &ViewModel, area: Rect) {
-    let content_layout = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
-        .split(area);
+    let regions = home_regions(area);
 
     let list_items = if view_model.sessions.is_empty() {
         vec![ListItem::new(Line::from(view_model.empty_message.as_str()))]
@@ -188,6 +241,7 @@ fn render_home(frame: &mut Frame, view_model: &ViewModel, area: Rect) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Blue))
                 .title("Sessions | Home"),
         )
         .highlight_style(
@@ -202,7 +256,7 @@ fn render_home(frame: &mut Frame, view_model: &ViewModel, area: Rect) {
     if !view_model.sessions.is_empty() {
         list_state.select(view_model.selected_session);
     }
-    frame.render_stateful_widget(list, content_layout[0], &mut list_state);
+    frame.render_stateful_widget(list, regions.list, &mut list_state);
 
     let details_text = if view_model.detail_lines.is_empty() {
         vec![Line::from("No detail available.")]
@@ -215,10 +269,15 @@ fn render_home(frame: &mut Frame, view_model: &ViewModel, area: Rect) {
     };
 
     let details = Paragraph::new(details_text)
-        .block(Block::default().borders(Borders::ALL).title("Details"))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Magenta))
+                .title("Details"),
+        )
         .wrap(Wrap { trim: false });
 
-    frame.render_widget(details, content_layout[1]);
+    frame.render_widget(details, regions.details);
 }
 
 fn render_help(frame: &mut Frame, view_model: &ViewModel, area: Rect) {
@@ -229,14 +288,20 @@ fn render_help(frame: &mut Frame, view_model: &ViewModel, area: Rect) {
         .collect::<Vec<_>>();
 
     let help = Paragraph::new(help_text)
-        .block(Block::default().borders(Borders::ALL).title("Help Guide"))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow))
+                .title("Help Guide"),
+        )
         .wrap(Wrap { trim: false });
 
     frame.render_widget(help, area);
 }
 
 fn render_modal(frame: &mut Frame, modal: &ModalView) {
-    let area = centered_rect(60, 35, frame.area());
+    let area = modal_area(frame.area(), modal);
+    let buttons = modal_button_areas(area);
     frame.render_widget(Clear, area);
 
     match modal {
@@ -263,9 +328,16 @@ fn render_modal(frame: &mut Frame, modal: &ModalView) {
                     help.as_str(),
                     Style::default().fg(Color::DarkGray),
                 )),
+                Line::from(""),
+                Line::from("Use mouse to click Confirm or Cancel."),
             ];
             let widget = Paragraph::new(text)
-                .block(Block::default().borders(Borders::ALL).title(title.as_str()))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Cyan))
+                        .title(title.as_str()),
+                )
                 .wrap(Wrap { trim: false });
             frame.render_widget(widget, area);
         }
@@ -281,13 +353,101 @@ fn render_modal(frame: &mut Frame, modal: &ModalView) {
                     help.as_str(),
                     Style::default().fg(Color::DarkGray),
                 )),
+                Line::from(""),
+                Line::from("Mouse clicks on buttons are supported here."),
             ];
             let widget = Paragraph::new(text)
-                .block(Block::default().borders(Borders::ALL).title(title.as_str()))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Red))
+                        .title(title.as_str()),
+                )
                 .alignment(Alignment::Left)
                 .wrap(Wrap { trim: false });
             frame.render_widget(widget, area);
         }
+    }
+
+    render_modal_button(frame, buttons.confirm, "Confirm", true);
+    render_modal_button(frame, buttons.cancel, "Cancel", false);
+}
+
+fn render_modal_button(frame: &mut Frame, area: Rect, label: &str, primary: bool) {
+    let style = if primary {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(Color::White)
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD)
+    };
+
+    let button = Paragraph::new(label)
+        .style(style)
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::ALL));
+    frame.render_widget(button, area);
+}
+
+fn root_layout(area: Rect) -> RootLayout {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(10),
+            Constraint::Length(3),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+    RootLayout {
+        header: chunks[0],
+        content: chunks[1],
+        footer: chunks[2],
+        status: chunks[3],
+    }
+}
+
+fn home_regions(area: Rect) -> HomeRegions {
+    let compact = area.width < 96 || area.height < 18;
+    let chunks = if compact {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
+            .split(area)
+    };
+
+    HomeRegions {
+        list: chunks[0],
+        details: chunks[1],
+    }
+}
+
+fn modal_area(area: Rect, _modal: &ModalView) -> Rect {
+    let percent_x = if area.width < 90 { 78 } else { 60 };
+    let percent_y = if area.height < 24 { 55 } else { 35 };
+    centered_rect(percent_x, percent_y, area)
+}
+
+fn modal_button_areas(area: Rect) -> ModalButtons {
+    let button_y = area.y + area.height.saturating_sub(3);
+    let button_width = 12.min(area.width.saturating_sub(4));
+    let spacing = 2;
+    let total = button_width.saturating_mul(2).saturating_add(spacing);
+    let start_x = area.x + area.width.saturating_sub(total) / 2;
+
+    ModalButtons {
+        confirm: Rect::new(start_x, button_y, button_width, 3),
+        cancel: Rect::new(start_x + button_width + spacing, button_y, button_width, 3),
     }
 }
 
@@ -309,4 +469,86 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+fn inset_borders(area: Rect) -> Option<Rect> {
+    if area.width <= 2 || area.height <= 2 {
+        return None;
+    }
+
+    Some(Rect::new(
+        area.x + 1,
+        area.y + 1,
+        area.width - 2,
+        area.height - 2,
+    ))
+}
+
+fn contains(area: Rect, column: u16, row: u16) -> bool {
+    column >= area.x
+        && column < area.x.saturating_add(area.width)
+        && row >= area.y
+        && row < area.y.saturating_add(area.height)
+}
+
+struct RootLayout {
+    header: Rect,
+    content: Rect,
+    footer: Rect,
+    status: Rect,
+}
+
+struct HomeRegions {
+    list: Rect,
+    details: Rect,
+}
+
+struct ModalButtons {
+    confirm: Rect,
+    cancel: Rect,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ModalButton, ModalView, Screen, ViewModel, modal_button_at, session_index_at};
+
+    #[test]
+    fn click_maps_to_session_index() {
+        let index = session_index_at(120, 32, 3, 4, 5);
+        assert_eq!(index, Some(1));
+    }
+
+    #[test]
+    fn click_outside_session_list_is_ignored() {
+        let index = session_index_at(120, 32, 3, 90, 5);
+        assert_eq!(index, None);
+    }
+
+    #[test]
+    fn modal_buttons_are_clickable() {
+        let modal = ModalView::Confirm {
+            title: "Kill".to_string(),
+            message: "Kill session?".to_string(),
+            help: "help".to_string(),
+        };
+        let hit = modal_button_at(120, 32, &modal, 50, 18);
+        assert_eq!(hit, Some(ModalButton::Confirm));
+    }
+
+    #[test]
+    fn help_screen_variant_exists_in_view_model_usage() {
+        let view_model = ViewModel {
+            screen: Screen::Help,
+            title: "tmuxr".to_string(),
+            subtitle: "help".to_string(),
+            sessions: Vec::new(),
+            selected_session: None,
+            detail_lines: vec!["line".to_string()],
+            empty_message: String::new(),
+            footer_hint: String::new(),
+            status_message: String::new(),
+            modal: None,
+        };
+        assert!(matches!(view_model.screen, Screen::Help));
+    }
 }

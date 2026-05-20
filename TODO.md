@@ -61,12 +61,12 @@ This document organizes the work for `tmuxr` by phase so development can move fr
 
 ## Phase 6. Mouse Support and UX Polish
 
-- Enable mouse capture where terminal support exists.
-- Support clicking list items to focus/select them.
-- Support clicking action buttons or dialog controls.
-- Verify behavior when mouse support is unavailable.
-- Improve focus styling and interaction feedback.
-- Tune layouts for small and medium terminal sizes.
+- [x] Enable mouse capture where terminal support exists.
+- [x] Support clicking list items to focus/select them.
+- [x] Support clicking action buttons or dialog controls.
+- [x] Verify behavior when mouse support is unavailable.
+- [x] Improve focus styling and interaction feedback.
+- [x] Tune layouts for small and medium terminal sizes.
 
 ## Phase 7. Window Management
 
@@ -118,6 +118,6 @@ This document organizes the work for `tmuxr` by phase so development can move fr
 
 ## Suggested Immediate Next Tasks
 
-- Add mouse-based selection and action triggers.
-- Improve focus styling and feedback for dialogs.
-- Tune layouts for smaller terminals.
+- Add `tmux list-windows` integration.
+- Define window models and a window list/detail screen.
+- Reuse the current selection and modal patterns for window actions.
