@@ -33,13 +33,13 @@ This document organizes the work for `tmuxr` by phase so development can move fr
 
 ## Phase 3. Session List MVP
 
-- Render sessions in a selectable list.
-- Support up/down cursor navigation.
-- Support Enter to select the highlighted action target.
-- Show session metadata such as name, window count, and attach state.
-- Display an empty state when no sessions exist.
-- Add refresh support to reload session state.
-- Make the selected item visually obvious.
+- [x] Render sessions in a selectable list.
+- [x] Support up/down cursor navigation.
+- [x] Support Enter to select the highlighted action target.
+- [x] Show session metadata such as name, window count, and attach state.
+- [x] Display an empty state when no sessions exist.
+- [x] Add refresh support to reload session state.
+- [x] Make the selected item visually obvious.
 
 ## Phase 4. Session Actions
 
@@ -118,6 +118,6 @@ This document organizes the work for `tmuxr` by phase so development can move fr
 
 ## Suggested Immediate Next Tasks
 
-- Render sessions in a selectable list widget.
-- Add up/down selection state and highlight styling.
-- Wire Enter to a placeholder session action before mutating commands land.
+- Implement create session flow.
+- Implement attach or switch flow for the selected session.
+- Add a confirmation dialog before kill session lands.

@@ -10,7 +10,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
 use crate::config::AppConfig;
@@ -21,11 +21,21 @@ pub enum Screen {
 }
 
 #[derive(Debug, Clone)]
+pub struct SessionListItem {
+    pub name: String,
+    pub window_count: usize,
+    pub attached: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct ViewModel {
     pub screen: Screen,
     pub title: String,
     pub subtitle: String,
-    pub content_lines: Vec<String>,
+    pub sessions: Vec<SessionListItem>,
+    pub selected_session: Option<usize>,
+    pub detail_lines: Vec<String>,
+    pub empty_message: String,
     pub footer_hint: String,
     pub status_message: String,
 }
@@ -85,7 +95,7 @@ pub fn render(frame: &mut Frame, view_model: &ViewModel) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
-            Constraint::Min(8),
+            Constraint::Min(10),
             Constraint::Length(3),
             Constraint::Length(1),
         ])
@@ -106,19 +116,67 @@ pub fn render(frame: &mut Frame, view_model: &ViewModel) {
         Screen::Home => "Home",
     };
 
-    let content = Paragraph::new(
+    let content_layout = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
+        .split(layout[1]);
+
+    let list_items = if view_model.sessions.is_empty() {
+        vec![ListItem::new(Line::from(view_model.empty_message.as_str()))]
+    } else {
         view_model
-            .content_lines
+            .sessions
+            .iter()
+            .map(|session| {
+                let attached = if session.attached {
+                    "attached"
+                } else {
+                    "detached"
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("{} ", session.name),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(format!("windows={} | {attached}", session.window_count)),
+                ]))
+            })
+            .collect()
+    };
+
+    let list = List::new(list_items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("Sessions | {screen_name}")),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::Cyan)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ");
+
+    let mut list_state = ListState::default();
+    if !view_model.sessions.is_empty() {
+        list_state.select(view_model.selected_session);
+    }
+    frame.render_stateful_widget(list, content_layout[0], &mut list_state);
+
+    let details_text = if view_model.detail_lines.is_empty() {
+        vec![Line::from("No detail available.")]
+    } else {
+        view_model
+            .detail_lines
             .iter()
             .map(|line| Line::from(line.as_str()))
-            .collect::<Vec<_>>(),
-    )
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!("Content | {screen_name}")),
-    )
-    .wrap(Wrap { trim: false });
+            .collect::<Vec<_>>()
+    };
+
+    let details = Paragraph::new(details_text)
+        .block(Block::default().borders(Borders::ALL).title("Details"))
+        .wrap(Wrap { trim: false });
 
     let footer = Paragraph::new(view_model.footer_hint.as_str())
         .block(Block::default().borders(Borders::ALL).title("Help"));
@@ -132,7 +190,8 @@ pub fn render(frame: &mut Frame, view_model: &ViewModel) {
     )));
 
     frame.render_widget(header, layout[0]);
-    frame.render_widget(content, layout[1]);
+    frame.render_widget(Clear, content_layout[0]);
+    frame.render_widget(details, content_layout[1]);
     frame.render_widget(footer, layout[2]);
     frame.render_widget(status, layout[3]);
 }

@@ -6,7 +6,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use crate::config::AppConfig;
 use crate::domain::SessionSummary;
 use crate::tmux::{TmuxClient, TmuxContext};
-use crate::ui::{Screen, TerminalGuard, ViewModel};
+use crate::ui::{Screen, SessionListItem, TerminalGuard, ViewModel};
 
 pub struct App {
     config: AppConfig,
@@ -22,6 +22,7 @@ struct AppState {
     footer_hint: String,
     tmux_context: TmuxContext,
     sessions: Vec<SessionSummary>,
+    selected_session: Option<usize>,
 }
 
 impl App {
@@ -62,9 +63,12 @@ impl App {
                 self.state.should_quit = true;
             }
             KeyCode::Char('r') => self.refresh_sessions(),
+            KeyCode::Up | KeyCode::Char('k') => self.state.select_previous_session(),
+            KeyCode::Down | KeyCode::Char('j') => self.state.select_next_session(),
+            KeyCode::Enter => self.state.activate_selected_session(),
             _ => {
                 self.state.status_message = format!(
-                    "Unhandled key: {}. Press q or Esc to quit, r to refresh.",
+                    "Unhandled key: {}. Use Up/Down, Enter, r, q or Esc.",
                     describe_key_code(key.code)
                 );
             }
@@ -77,6 +81,7 @@ impl App {
 
         if !context.binary_available {
             self.state.sessions.clear();
+            self.state.selected_session = None;
             self.state.status_message =
                 "tmux is not installed or not available in PATH.".to_string();
             return;
@@ -86,6 +91,7 @@ impl App {
             Ok(sessions) => {
                 let session_count = sessions.len();
                 self.state.sessions = sessions;
+                self.state.ensure_valid_selection();
                 self.state.status_message = if session_count == 0 {
                     "Connected to tmux. No sessions found.".to_string()
                 } else {
@@ -94,6 +100,7 @@ impl App {
             }
             Err(error) => {
                 self.state.sessions.clear();
+                self.state.selected_session = None;
                 self.state.status_message = format!("Failed to load tmux sessions: {error}");
             }
         }
@@ -106,9 +113,10 @@ impl AppState {
             screen: Screen::Home,
             should_quit: false,
             status_message: "Starting tmuxr...".to_string(),
-            footer_hint: "q/Esc quit | r refresh | resize supported".to_string(),
+            footer_hint: "Up/Down move | Enter inspect | r refresh | q/Esc quit".to_string(),
             tmux_context: TmuxContext::default(),
             sessions: Vec::new(),
+            selected_session: None,
         }
     }
 
@@ -116,38 +124,121 @@ impl AppState {
         self.status_message = format!("Terminal resized to {width}x{height}.");
     }
 
+    fn ensure_valid_selection(&mut self) {
+        self.selected_session = match self.sessions.len() {
+            0 => None,
+            len => match self.selected_session {
+                Some(index) if index < len => Some(index),
+                _ => Some(0),
+            },
+        };
+    }
+
+    fn select_previous_session(&mut self) {
+        if self.sessions.is_empty() {
+            self.selected_session = None;
+            self.status_message = "No sessions available to select.".to_string();
+            return;
+        }
+
+        let current = self.selected_session.unwrap_or(0);
+        let next = if current == 0 {
+            self.sessions.len() - 1
+        } else {
+            current - 1
+        };
+        self.selected_session = Some(next);
+        self.status_message = format!("Selected session '{}'.", self.sessions[next].name);
+    }
+
+    fn select_next_session(&mut self) {
+        if self.sessions.is_empty() {
+            self.selected_session = None;
+            self.status_message = "No sessions available to select.".to_string();
+            return;
+        }
+
+        let current = self.selected_session.unwrap_or(0);
+        let next = if current + 1 >= self.sessions.len() {
+            0
+        } else {
+            current + 1
+        };
+        self.selected_session = Some(next);
+        self.status_message = format!("Selected session '{}'.", self.sessions[next].name);
+    }
+
+    fn activate_selected_session(&mut self) {
+        let Some(index) = self.selected_session else {
+            self.status_message = "No session selected.".to_string();
+            return;
+        };
+
+        let session = &self.sessions[index];
+        self.status_message = format!(
+            "Selected '{}' for a future action. Session actions land in the next phase.",
+            session.name
+        );
+    }
+
     fn view_model(&self) -> ViewModel {
-        let mut content_lines = vec![
+        let sessions = self
+            .sessions
+            .iter()
+            .map(|session| SessionListItem {
+                name: session.name.clone(),
+                window_count: session.window_count,
+                attached: session.attached,
+            })
+            .collect();
+
+        ViewModel {
+            screen: self.screen,
+            title: "tmuxr".to_string(),
+            subtitle: "Session list MVP".to_string(),
+            sessions,
+            selected_session: self.selected_session,
+            detail_lines: self.detail_lines(),
+            empty_message: self.empty_message(),
+            footer_hint: self.footer_hint.clone(),
+            status_message: self.status_message.clone(),
+        }
+    }
+
+    fn detail_lines(&self) -> Vec<String> {
+        let mut lines = vec![
             format!("Inside tmux client: {}", self.tmux_context.inside_client),
             format!("Known sessions: {}", self.sessions.len()),
             String::new(),
         ];
 
         if !self.tmux_context.binary_available {
-            content_lines.push("tmux is not available in PATH.".to_string());
-            content_lines.push("Install tmux, then press r to retry detection.".to_string());
-        } else if self.sessions.is_empty() {
-            content_lines.push("No tmux sessions are currently running.".to_string());
-            content_lines
-                .push("The read-only session list view will land in the next phase.".to_string());
-        } else {
-            content_lines.push("Sessions discovered during startup or refresh:".to_string());
-            content_lines.push(String::new());
-            for session in &self.sessions {
-                content_lines.push(format!(
-                    "- {} | windows={} | attached={}",
-                    session.name, session.window_count, session.attached
-                ));
-            }
+            lines.push("tmux is not available in PATH.".to_string());
+            lines.push("Install tmux, then press r to retry detection.".to_string());
+            return lines;
         }
 
-        ViewModel {
-            screen: self.screen,
-            title: "tmuxr".to_string(),
-            subtitle: "Terminal UI framework bootstrap".to_string(),
-            content_lines,
-            footer_hint: self.footer_hint.clone(),
-            status_message: self.status_message.clone(),
+        let Some(index) = self.selected_session else {
+            lines.push("No session selected.".to_string());
+            lines.push("Use Up/Down to choose a session when one exists.".to_string());
+            return lines;
+        };
+
+        let session = &self.sessions[index];
+        lines.push(format!("Selected session: {}", session.name));
+        lines.push(format!("Window count: {}", session.window_count));
+        lines.push(format!("Attached: {}", session.attached));
+        lines.push(String::new());
+        lines.push("Enter currently marks this session as the action target.".to_string());
+        lines.push("Create/attach/detach/kill actions arrive in the next phase.".to_string());
+        lines
+    }
+
+    fn empty_message(&self) -> String {
+        if !self.tmux_context.binary_available {
+            "tmux not available".to_string()
+        } else {
+            "No tmux sessions running".to_string()
         }
     }
 }
@@ -179,6 +270,7 @@ fn describe_key_code(code: KeyCode) -> String {
 #[cfg(test)]
 mod tests {
     use super::{AppState, describe_key_code};
+    use crate::domain::SessionSummary;
     use crossterm::event::KeyCode;
 
     #[test]
@@ -192,5 +284,38 @@ mod tests {
     fn key_code_description_is_human_readable() {
         assert_eq!(describe_key_code(KeyCode::Up), "Up");
         assert_eq!(describe_key_code(KeyCode::Char('r')), "r");
+    }
+
+    #[test]
+    fn selection_defaults_to_first_session() {
+        let mut state = AppState::new();
+        state.sessions = vec![SessionSummary::new("dev", 2, true)];
+        state.ensure_valid_selection();
+        assert_eq!(state.selected_session, Some(0));
+    }
+
+    #[test]
+    fn selection_wraps_forward() {
+        let mut state = AppState::new();
+        state.sessions = vec![
+            SessionSummary::new("dev", 2, true),
+            SessionSummary::new("ops", 1, false),
+        ];
+        state.ensure_valid_selection();
+        state.select_next_session();
+        state.select_next_session();
+        assert_eq!(state.selected_session, Some(0));
+    }
+
+    #[test]
+    fn selection_wraps_backward() {
+        let mut state = AppState::new();
+        state.sessions = vec![
+            SessionSummary::new("dev", 2, true),
+            SessionSummary::new("ops", 1, false),
+        ];
+        state.ensure_valid_selection();
+        state.select_previous_session();
+        assert_eq!(state.selected_session, Some(1));
     }
 }
