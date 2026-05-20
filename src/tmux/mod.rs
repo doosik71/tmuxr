@@ -20,7 +20,7 @@ pub struct TmuxContext {
 pub enum TmuxError {
     #[error("tmux binary not found in PATH")]
     BinaryNotFound,
-    #[error("tmux command failed: {command}")]
+    #[error("tmux command failed: {command}\nstderr: {stderr}")]
     CommandFailed { command: String, stderr: String },
     #[error("failed to parse tmux session line: {line}")]
     InvalidSessionLine { line: String },
@@ -75,13 +75,9 @@ impl TmuxClient {
         parse_sessions_output(&output.stdout)
     }
 
-    pub fn create_session(&self, name: &str, detached: bool) -> Result<(), TmuxError> {
+    pub fn create_session(&self, name: &str) -> Result<(), TmuxError> {
         let name = validate_session_name(name)?;
-        if detached {
-            self.run(["new-session", "-d", "-s", name])?;
-        } else {
-            self.run(["new-session", "-s", name])?;
-        }
+        self.run(["new-session", "-d", "-s", name])?;
         Ok(())
     }
 
@@ -89,13 +85,23 @@ impl TmuxClient {
         &self,
         name: &str,
         inside_client: bool,
-    ) -> Result<(), TmuxError> {
+    ) -> Result<bool, TmuxError> {
         let name = validate_session_name(name)?;
         if inside_client {
             self.run(["switch-client", "-t", name])?;
+            Ok(false)
         } else {
-            self.run(["attach-session", "-t", name])?;
+            Ok(true)
         }
+    }
+
+    pub fn spawn_attach(&self, name: &str) -> Result<(), TmuxError> {
+        let mut child = Command::new(&self.program)
+            .args(["attach-session", "-t", name])
+            .spawn()
+            .map_err(map_io_error)?;
+
+        child.wait().map_err(map_io_error)?;
         Ok(())
     }
 

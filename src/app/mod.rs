@@ -11,8 +11,8 @@ use crate::config::AppConfig;
 use crate::domain::SessionSummary;
 use crate::tmux::{TmuxClient, TmuxContext};
 use crate::ui::{
-    ModalButton, ModalView, Screen, SessionListItem, TerminalGuard, ViewModel, modal_button_at,
-    session_index_at,
+    FocusArea, ModalButton, ModalView, NavButton, Screen, SessionListItem, TerminalGuard,
+    ViewModel, detail_button_index_at, menu_button_index_at, modal_button_at, session_index_at,
 };
 
 pub struct App {
@@ -31,6 +31,11 @@ struct AppState {
     selected_session: Option<usize>,
     interaction: InteractionState,
     terminal_size: (u16, u16),
+    pending_attach: Option<String>,
+    focus: FocusArea,
+    menu_index: usize,
+    detail_action_index: usize,
+    needs_clear: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -53,20 +58,39 @@ impl App {
     pub fn run(&mut self) -> Result<()> {
         self.refresh_sessions();
 
-        let mut terminal = TerminalGuard::new(&self.config)?;
         while !self.state.should_quit {
-            let view_model = self.state.view_model();
-            terminal.draw(&view_model)?;
+            let mut terminal = TerminalGuard::new(&self.config)?;
+            terminal.clear()?; // Ensure fresh start for every new guard
 
-            if event::poll(Duration::from_millis(250))? {
-                match event::read()? {
-                    Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        self.handle_key_event(key)
-                    }
-                    Event::Mouse(mouse) => self.handle_mouse_event(mouse),
-                    Event::Resize(width, height) => self.state.handle_resize(width, height),
-                    _ => {}
+            while !self.state.should_quit && self.state.pending_attach.is_none() {
+                if self.state.needs_clear {
+                    let _ = terminal.clear();
+                    self.state.needs_clear = false;
                 }
+                let view_model = self.state.view_model();
+                terminal.draw(&view_model)?;
+
+                if event::poll(Duration::from_millis(250))? {
+                    match event::read()? {
+                        Event::Key(key) if key.kind == KeyEventKind::Press => {
+                            self.handle_key_event(key)
+                        }
+                        Event::Mouse(mouse) => self.handle_mouse_event(mouse),
+                        Event::Resize(width, height) => {
+                            self.state.handle_resize(width, height);
+                            let _ = terminal.clear(); // Clear on resize
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            if let Some(session_name) = self.state.pending_attach.take() {
+                drop(terminal);
+                if let Err(error) = self.tmux_client.spawn_attach(&session_name) {
+                    self.state.status_message = format!("Failed to attach: {error}");
+                }
+                self.refresh_sessions();
             }
         }
 
@@ -95,79 +119,177 @@ impl App {
     }
 
     fn handle_left_click(&mut self, mouse: MouseEvent) {
-        let Some(modal) = self.state.modal_view() else {
-            if self.state.screen == Screen::Home {
-                if let Some(index) = session_index_at(
-                    self.state.terminal_size.0,
-                    self.state.terminal_size.1,
-                    self.state.sessions.len(),
-                    mouse.column,
-                    mouse.row,
-                ) {
-                    self.state.select_session(index);
+        if let Some(modal) = self.state.modal_view() {
+            if let Some(button) = modal_button_at(
+                self.state.terminal_size.0,
+                self.state.terminal_size.1,
+                &modal,
+                mouse.column,
+                mouse.row,
+            ) {
+                match button {
+                    ModalButton::Confirm => match self.state.interaction.clone() {
+                        InteractionState::Creating { detached, .. } => self.create_session(detached),
+                        InteractionState::ConfirmKill { session_name } => {
+                            self.kill_session(&session_name)
+                        }
+                        InteractionState::Browsing => {}
+                    },
+                    ModalButton::Cancel => match self.state.interaction {
+                        InteractionState::Creating { .. } => {
+                            self.state.cancel_interaction("Canceled session creation.")
+                        }
+                        InteractionState::ConfirmKill { .. } => self
+                            .state
+                            .cancel_interaction("Canceled kill session action."),
+                        InteractionState::Browsing => {}
+                    },
                 }
             }
             return;
-        };
+        }
 
-        match modal_button_at(
+        // Check MenuBar
+        if let Some(index) = menu_button_index_at(
             self.state.terminal_size.0,
             self.state.terminal_size.1,
-            &modal,
             mouse.column,
             mouse.row,
         ) {
-            Some(ModalButton::Confirm) => match self.state.interaction.clone() {
-                InteractionState::Creating { detached, .. } => self.create_session(detached),
-                InteractionState::ConfirmKill { session_name } => self.kill_session(&session_name),
-                InteractionState::Browsing => {}
-            },
-            Some(ModalButton::Cancel) => match self.state.interaction {
-                InteractionState::Creating { .. } => {
-                    self.state.cancel_interaction("Canceled session creation.")
-                }
-                InteractionState::ConfirmKill { .. } => self
-                    .state
-                    .cancel_interaction("Canceled kill session action."),
-                InteractionState::Browsing => {}
-            },
-            None => {}
+            self.state.focus = FocusArea::MenuBar;
+            self.state.menu_index = index;
+            self.trigger_menu_action();
+            return;
+        }
+
+        // Check SessionList
+        if let Some(index) = session_index_at(
+            self.state.terminal_size.0,
+            self.state.terminal_size.1,
+            self.state.sessions.len(),
+            mouse.column,
+            mouse.row,
+        ) {
+            self.state.focus = FocusArea::SessionList;
+            self.state.select_session(index);
+            return;
+        }
+
+        // Check Details Actions
+        let button_count = self.state.detail_buttons_count();
+        if let Some(index) = detail_button_index_at(
+            self.state.terminal_size.0,
+            self.state.terminal_size.1,
+            button_count,
+            mouse.column,
+            mouse.row,
+        ) {
+            self.state.focus = FocusArea::Details;
+            self.state.detail_action_index = index;
+            self.trigger_detail_action();
+            return;
         }
     }
 
     fn handle_browsing_key_event(&mut self, key: KeyEvent) {
         if self.state.screen == Screen::Help {
             match key.code {
-                KeyCode::Char('?') | KeyCode::Char('h') | KeyCode::Esc => self.state.show_home(),
+                KeyCode::Char('?') | KeyCode::Esc => self.state.show_home(),
                 KeyCode::Char('q') => self.state.should_quit = true,
-                _ => {
-                    self.state.status_message =
-                        "Help is open. Press h, ?, or Esc to go back.".to_string();
-                }
+                _ => {}
             }
             return;
         }
 
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => self.state.should_quit = true,
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.state.should_quit = true;
+            KeyCode::Tab => {
+                self.state.focus = match self.state.focus {
+                    FocusArea::MenuBar => FocusArea::SessionList,
+                    FocusArea::SessionList => FocusArea::Details,
+                    FocusArea::Details => FocusArea::MenuBar,
+                };
             }
-            KeyCode::Char('?') | KeyCode::Char('h') => self.state.show_help(),
-            KeyCode::Char('r') => self.refresh_sessions(),
-            KeyCode::Up | KeyCode::Char('k') => self.state.select_previous_session(),
-            KeyCode::Down | KeyCode::Char('j') => self.state.select_next_session(),
-            KeyCode::Enter | KeyCode::Char('a') => self.attach_or_switch_selected_session(),
+            KeyCode::BackTab => {
+                self.state.focus = match self.state.focus {
+                    FocusArea::MenuBar => FocusArea::Details,
+                    FocusArea::SessionList => FocusArea::MenuBar,
+                    FocusArea::Details => FocusArea::SessionList,
+                };
+            }
+            KeyCode::Up | KeyCode::Char('k') => match self.state.focus {
+                FocusArea::SessionList => self.state.select_previous_session(),
+                FocusArea::Details => self.state.move_detail_focus_up(),
+                _ => {}
+            },
+            KeyCode::Down | KeyCode::Char('j') => match self.state.focus {
+                FocusArea::MenuBar => self.state.focus = FocusArea::SessionList,
+                FocusArea::SessionList => self.state.select_next_session(),
+                FocusArea::Details => self.state.move_detail_focus_down(),
+            },
+            KeyCode::Left | KeyCode::Char('h') => match self.state.focus {
+                FocusArea::MenuBar => self.state.move_menu_focus_left(),
+                FocusArea::SessionList => self.state.focus = FocusArea::MenuBar,
+                FocusArea::Details => self.state.focus = FocusArea::SessionList,
+            },
+            KeyCode::Right | KeyCode::Char('l') => match self.state.focus {
+                FocusArea::MenuBar => self.state.move_menu_focus_right(),
+                FocusArea::SessionList => self.state.focus = FocusArea::Details,
+                _ => {}
+            },
+            KeyCode::Enter | KeyCode::Char(' ') => match self.state.focus {
+                FocusArea::MenuBar => self.trigger_menu_action(),
+                FocusArea::SessionList => self.attach_or_switch_selected_session(),
+                FocusArea::Details => self.trigger_detail_action(),
+            },
+            // Legacy hotkeys for convenience
             KeyCode::Char('n') => self.state.start_create(false),
             KeyCode::Char('N') => self.state.start_create(true),
+            KeyCode::Char('r') => self.refresh_sessions(),
             KeyCode::Char('d') => self.detach_current_client(),
             KeyCode::Char('x') => self.state.start_kill_confirmation(),
-            _ => {
-                self.state.status_message = format!(
-                    "Unhandled key: {}. Press ? for help.",
-                    describe_key_code(key.code)
-                );
-            }
+            KeyCode::Char('?') => self.state.show_help(),
+            KeyCode::Char('q') | KeyCode::Esc => self.state.should_quit = true,
+            _ => {}
+        }
+    }
+
+    fn trigger_menu_action(&mut self) {
+        match self.state.menu_index {
+            0 => self.state.start_create(false),
+            1 => self.refresh_sessions(),
+            2 => self.state.show_help(),
+            3 => self.state.should_quit = true,
+            _ => {}
+        }
+    }
+
+    fn trigger_detail_action(&mut self) {
+        let session_attached = self
+            .state
+            .selected_session
+            .and_then(|i| self.state.sessions.get(i))
+            .map(|s| s.attached)
+            .unwrap_or(false);
+
+        let action = match (session_attached, self.state.tmux_context.inside_client) {
+            (true, true) => match self.state.detail_action_index {
+                0 => "attach",
+                1 => "detach",
+                2 => "kill",
+                _ => return,
+            },
+            _ => match self.state.detail_action_index {
+                0 => "attach",
+                1 => "kill",
+                _ => return,
+            },
+        };
+
+        match action {
+            "attach" => self.attach_or_switch_selected_session(),
+            "detach" => self.detach_current_client(),
+            "kill" => self.state.start_kill_confirmation(),
+            _ => {}
         }
     }
 
@@ -205,14 +327,29 @@ impl App {
             return;
         };
 
-        match self.tmux_client.create_session(&name, detached) {
+        match self.tmux_client.create_session(&name) {
             Ok(()) => {
                 self.state.finish_interaction();
                 self.refresh_sessions();
+                self.state.needs_clear = true;
+
+                if !detached && self.state.tmux_context.inside_client {
+                    if let Err(error) = self
+                        .tmux_client
+                        .attach_or_switch_session(&name, self.state.tmux_context.inside_client)
+                    {
+                        self.state.status_message =
+                            format!("Created session but failed to switch: {error}");
+                        return;
+                    }
+                }
+
                 self.state.status_message = if detached {
                     format!("Created detached session '{name}'.")
+                } else if self.state.tmux_context.inside_client {
+                    format!("Created and switched to session '{name}'.")
                 } else {
-                    format!("Created session '{name}'.")
+                    format!("Created session '{name}'. (Use tmux attach -t {name})")
                 };
             }
             Err(error) => {
@@ -231,13 +368,15 @@ impl App {
             .tmux_client
             .attach_or_switch_session(&session, self.state.tmux_context.inside_client)
         {
-            Ok(()) => {
-                self.refresh_sessions();
-                self.state.status_message = if self.state.tmux_context.inside_client {
-                    format!("Switched current client to '{session}'.")
+            Ok(needs_interactive) => {
+                self.state.needs_clear = true;
+                if needs_interactive {
+                    self.state.pending_attach = Some(session);
                 } else {
-                    format!("Attached to session '{session}'.")
-                };
+                    self.refresh_sessions();
+                    self.state.status_message =
+                        format!("Switched current client to '{session}'.");
+                }
             }
             Err(error) => {
                 self.state.status_message = format!("Failed to attach or switch session: {error}");
@@ -252,6 +391,7 @@ impl App {
         {
             Ok(()) => {
                 self.refresh_sessions();
+                self.state.needs_clear = true;
                 self.state.status_message = "Detached current tmux client.".to_string();
             }
             Err(error) => {
@@ -265,6 +405,7 @@ impl App {
             Ok(()) => {
                 self.state.finish_interaction();
                 self.refresh_sessions();
+                self.state.needs_clear = true;
                 self.state.status_message = format!("Killed session '{session_name}'.");
             }
             Err(error) => {
@@ -274,6 +415,7 @@ impl App {
     }
 
     fn refresh_sessions(&mut self) {
+        self.state.needs_clear = true;
         let context = self.tmux_client.detect();
         self.state.tmux_context = context.clone();
 
@@ -318,6 +460,11 @@ impl AppState {
             selected_session: None,
             interaction: InteractionState::Browsing,
             terminal_size,
+            pending_attach: None,
+            focus: FocusArea::SessionList,
+            menu_index: 0,
+            detail_action_index: 0,
+            needs_clear: false,
         }
     }
 
@@ -334,10 +481,10 @@ impl AppState {
                 "y/Enter confirm kill | Click buttons | n/Esc cancel".to_string()
             }
             (Screen::Help, InteractionState::Browsing) => {
-                "h/?/Esc back | q quit".to_string()
+                "?/Esc back | q quit".to_string()
             }
             (Screen::Home, InteractionState::Browsing) => {
-                "?/h help | Up/Down or wheel move | Click select | Enter/a attach | n/N create | d detach | x kill | r refresh | q quit".to_string()
+                "? help | Up/Down or wheel move | Click select | Enter/a attach | n/N create | d detach | x kill | r refresh | q quit".to_string()
             }
         }
     }
@@ -425,6 +572,52 @@ impl AppState {
         }
     }
 
+    fn move_menu_focus_left(&mut self) {
+        if self.menu_index > 0 {
+            self.menu_index -= 1;
+        } else {
+            self.menu_index = 3; // Wrap to Quit
+        }
+    }
+
+    fn move_menu_focus_right(&mut self) {
+        if self.menu_index < 3 {
+            self.menu_index += 1;
+        } else {
+            self.menu_index = 0; // Wrap to New
+        }
+    }
+
+    fn move_detail_focus_up(&mut self) {
+        if self.detail_action_index > 0 {
+            self.detail_action_index -= 1;
+        } else {
+            let max = self.detail_buttons_count().saturating_sub(1);
+            self.detail_action_index = max;
+        }
+    }
+
+    fn move_detail_focus_down(&mut self) {
+        let max = self.detail_buttons_count().saturating_sub(1);
+        if self.detail_action_index < max {
+            self.detail_action_index += 1;
+        } else {
+            self.detail_action_index = 0;
+        }
+    }
+
+    fn detail_buttons_count(&self) -> usize {
+        let session = match self.selected_session.and_then(|i| self.sessions.get(i)) {
+            Some(s) => s,
+            None => return 0,
+        };
+        if session.attached && self.tmux_context.inside_client {
+            3 // Attach, Detach, Kill
+        } else {
+            2 // Attach, Kill
+        }
+    }
+
     fn select_previous_session(&mut self) {
         if self.sessions.is_empty() {
             self.selected_session = None;
@@ -476,6 +669,52 @@ impl AppState {
             })
             .collect();
 
+        let menu_buttons = vec![
+            NavButton {
+                label: "New".to_string(),
+                key_hint: "n".to_string(),
+                selected: self.focus == FocusArea::MenuBar && self.menu_index == 0,
+            },
+            NavButton {
+                label: "Refresh".to_string(),
+                key_hint: "r".to_string(),
+                selected: self.focus == FocusArea::MenuBar && self.menu_index == 1,
+            },
+            NavButton {
+                label: "Help".to_string(),
+                key_hint: "?".to_string(),
+                selected: self.focus == FocusArea::MenuBar && self.menu_index == 2,
+            },
+            NavButton {
+                label: "Quit".to_string(),
+                key_hint: "q".to_string(),
+                selected: self.focus == FocusArea::MenuBar && self.menu_index == 3,
+            },
+        ];
+
+        let mut detail_buttons = Vec::new();
+        if let Some(session) = self.selected_session.and_then(|i| self.sessions.get(i)) {
+            detail_buttons.push(NavButton {
+                label: "Attach".to_string(),
+                key_hint: "a".to_string(),
+                selected: self.focus == FocusArea::Details && self.detail_action_index == 0,
+            });
+            if session.attached && self.tmux_context.inside_client {
+                let idx = detail_buttons.len();
+                detail_buttons.push(NavButton {
+                    label: "Detach".to_string(),
+                    key_hint: "d".to_string(),
+                    selected: self.focus == FocusArea::Details && self.detail_action_index == idx,
+                });
+            }
+            let idx = detail_buttons.len();
+            detail_buttons.push(NavButton {
+                label: "Kill".to_string(),
+                key_hint: "x".to_string(),
+                selected: self.focus == FocusArea::Details && self.detail_action_index == idx,
+            });
+        }
+
         ViewModel {
             screen: self.screen,
             title: "tmuxr".to_string(),
@@ -496,6 +735,9 @@ impl AppState {
             footer_hint: self.current_footer_hint(),
             status_message: self.status_message.clone(),
             modal: self.modal_view(),
+            focus: self.focus,
+            menu_buttons,
+            detail_buttons,
         }
     }
 
@@ -539,7 +781,7 @@ impl AppState {
         );
         lines.push("Mouse: click a session to select it, scroll to move.".to_string());
         lines.push("Creation: n for attached session, N for detached session.".to_string());
-        lines.push("Guidance: press ? or h to open the full help screen.".to_string());
+        lines.push("Guidance: press ? to open the full help screen.".to_string());
         lines
     }
 
@@ -554,7 +796,7 @@ impl AppState {
             "- Enter or a: attach to the selected session, or switch client inside tmux"
                 .to_string(),
             "- r: refresh the tmux session list".to_string(),
-            "- h or ?: open/close this help screen".to_string(),
+            "- ?: open/close this help screen".to_string(),
             "- Esc: go back from help, cancel dialogs, or quit from the main screen".to_string(),
             "- q: quit tmuxr".to_string(),
             String::new(),
@@ -610,29 +852,29 @@ impl AppState {
     }
 }
 
-fn describe_key_code(code: KeyCode) -> String {
-    match code {
-        KeyCode::Backspace => "Backspace".to_string(),
-        KeyCode::Enter => "Enter".to_string(),
-        KeyCode::Left => "Left".to_string(),
-        KeyCode::Right => "Right".to_string(),
-        KeyCode::Up => "Up".to_string(),
-        KeyCode::Down => "Down".to_string(),
-        KeyCode::Home => "Home".to_string(),
-        KeyCode::End => "End".to_string(),
-        KeyCode::PageUp => "PageUp".to_string(),
-        KeyCode::PageDown => "PageDown".to_string(),
-        KeyCode::Tab => "Tab".to_string(),
-        KeyCode::BackTab => "BackTab".to_string(),
-        KeyCode::Delete => "Delete".to_string(),
-        KeyCode::Insert => "Insert".to_string(),
-        KeyCode::F(number) => format!("F{number}"),
-        KeyCode::Char(character) => character.to_string(),
-        KeyCode::Null => "Null".to_string(),
-        KeyCode::Esc => "Esc".to_string(),
-        other => format!("{other:?}"),
-    }
-}
+// fn describe_key_code(code: KeyCode) -> String {
+//     match code {
+//         KeyCode::Backspace => "Backspace".to_string(),
+//         KeyCode::Enter => "Enter".to_string(),
+//         KeyCode::Left => "Left".to_string(),
+//         KeyCode::Right => "Right".to_string(),
+//         KeyCode::Up => "Up".to_string(),
+//         KeyCode::Down => "Down".to_string(),
+//         KeyCode::Home => "Home".to_string(),
+//         KeyCode::End => "End".to_string(),
+//         KeyCode::PageUp => "PageUp".to_string(),
+//         KeyCode::PageDown => "PageDown".to_string(),
+//         KeyCode::Tab => "Tab".to_string(),
+//         KeyCode::BackTab => "BackTab".to_string(),
+//         KeyCode::Delete => "Delete".to_string(),
+//         KeyCode::Insert => "Insert".to_string(),
+//         KeyCode::F(number) => format!("F{number}"),
+//         KeyCode::Char(character) => character.to_string(),
+//         KeyCode::Null => "Null".to_string(),
+//         KeyCode::Esc => "Esc".to_string(),
+//         other => format!("{other:?}"),
+//     }
+// }
 
 #[cfg(test)]
 mod tests {
