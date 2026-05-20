@@ -26,6 +26,10 @@ pub enum TmuxError {
     InvalidSessionLine { line: String },
     #[error("invalid window count in tmux session line: {value}")]
     InvalidWindowCount { value: String },
+    #[error("session name cannot be empty")]
+    EmptySessionName,
+    #[error("detach is only available inside a tmux client")]
+    DetachRequiresClient,
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +75,44 @@ impl TmuxClient {
         parse_sessions_output(&output.stdout)
     }
 
+    pub fn create_session(&self, name: &str, detached: bool) -> Result<(), TmuxError> {
+        let name = validate_session_name(name)?;
+        if detached {
+            self.run(["new-session", "-d", "-s", name])?;
+        } else {
+            self.run(["new-session", "-s", name])?;
+        }
+        Ok(())
+    }
+
+    pub fn attach_or_switch_session(
+        &self,
+        name: &str,
+        inside_client: bool,
+    ) -> Result<(), TmuxError> {
+        let name = validate_session_name(name)?;
+        if inside_client {
+            self.run(["switch-client", "-t", name])?;
+        } else {
+            self.run(["attach-session", "-t", name])?;
+        }
+        Ok(())
+    }
+
+    pub fn kill_session(&self, name: &str) -> Result<(), TmuxError> {
+        let name = validate_session_name(name)?;
+        self.run(["kill-session", "-t", name])?;
+        Ok(())
+    }
+
+    pub fn detach_client(&self, inside_client: bool) -> Result<(), TmuxError> {
+        if !inside_client {
+            return Err(TmuxError::DetachRequiresClient);
+        }
+        self.run(["detach-client"])?;
+        Ok(())
+    }
+
     fn run<I, S>(&self, args: I) -> Result<TmuxOutput, TmuxError>
     where
         I: IntoIterator<Item = S> + Clone,
@@ -107,6 +149,14 @@ struct TmuxOutput {
 
 pub fn is_inside_tmux() -> bool {
     env::var_os("TMUX").is_some_and(|value| !value.is_empty())
+}
+
+fn validate_session_name(name: &str) -> Result<&str, TmuxError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(TmuxError::EmptySessionName);
+    }
+    Ok(trimmed)
 }
 
 fn parse_sessions_output(output: &str) -> Result<Vec<SessionSummary>, TmuxError> {
@@ -181,7 +231,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{TmuxError, is_no_server_error, parse_session_line, parse_sessions_output};
+    use super::{
+        TmuxError, is_no_server_error, parse_session_line, parse_sessions_output,
+        validate_session_name,
+    };
     use crate::domain::SessionSummary;
 
     #[test]
@@ -223,5 +276,14 @@ mod tests {
         assert!(is_no_server_error("failed to connect to server"));
         assert!(is_no_server_error("no sessions"));
         assert!(!is_no_server_error("permission denied"));
+    }
+
+    #[test]
+    fn validates_session_name() {
+        assert_eq!(validate_session_name(" dev ").expect("valid"), "dev");
+        assert!(matches!(
+            validate_session_name("   "),
+            Err(TmuxError::EmptySessionName)
+        ));
     }
 }

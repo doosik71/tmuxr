@@ -43,21 +43,21 @@ This document organizes the work for `tmuxr` by phase so development can move fr
 
 ## Phase 4. Session Actions
 
-- Implement create session flow.
-- Implement create detached session flow.
-- Implement attach or switch flow depending on current tmux context.
-- Implement detach current client flow.
-- Implement kill session flow.
-- Add confirmation dialog for kill actions.
-- Surface success and failure messages in the UI.
+- [x] Implement create session flow.
+- [x] Implement create detached session flow.
+- [x] Implement attach or switch flow depending on current tmux context.
+- [x] Implement detach current client flow.
+- [x] Implement kill session flow.
+- [x] Add confirmation dialog for kill actions.
+- [x] Surface success and failure messages in the UI.
 
 ## Phase 5. Help and Guidance
 
-- Add an in-app help screen.
-- Add a built-in hotkey guide.
-- Add contextual hints in the footer or status bar.
-- Document primary keyboard shortcuts inside the UI.
-- Add clear cancel and back navigation behavior.
+- [x] Add an in-app help screen.
+- [x] Add a built-in hotkey guide.
+- [x] Add contextual hints in the footer or status bar.
+- [x] Document primary keyboard shortcuts inside the UI.
+- [x] Add clear cancel and back navigation behavior.
 
 ## Phase 6. Mouse Support and UX Polish
 
@@ -118,6 +118,6 @@ This document organizes the work for `tmuxr` by phase so development can move fr
 
 ## Suggested Immediate Next Tasks
 
-- Implement create session flow.
-- Implement attach or switch flow for the selected session.
-- Add a confirmation dialog before kill session lands.
+- Add mouse-based selection and action triggers.
+- Improve focus styling and feedback for dialogs.
+- Tune layouts for smaller terminals.
